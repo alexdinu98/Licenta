@@ -262,18 +262,222 @@ routes.get('/stl/:filename', checkAuthenticated, function (req, res) {
       return res.status(404).json({
         err: 'No file exist'
       });
+    } // Read output to browser
+
+
+    var readstream = gfs.createReadStream(file.filename);
+    readstream.pipe(res);
+  });
+});
+
+function sleep(ms) {
+  return new Promise(function (resolve) {
+    return setTimeout(resolve, ms);
+  });
+}
+
+var os = require('os');
+
+var chilkat = require('@chilkat/ck-node12-win64'); // @route GET /print/:filename
+// @desc print the stl
+
+
+routes.get('/print/:filename', checkAuthenticated, function (req, res) {
+  gfs.files.findOne({
+    filename: req.params.filename
+  }, function (err, file) {
+    // Check if file
+    if (!file || file.length === 0) {
+      return res.status(404).json({
+        err: 'No file exist'
+      });
     } //Check if stl
 
 
     if (file.contentType === 'application/octet-stream') {
       // Read output to browser
+      var fs = require('fs');
+
+      var data = [];
       var readstream = gfs.createReadStream(file.filename);
-      readstream.pipe(res);
+      var stream = fs.createWriteStream('stl/someFile.stl', {
+        flags: 'w'
+      });
+      readstream.on('data', function (chunk) {
+        stream.write(chunk);
+      });
+      readstream.on('end', function () {
+        data = Buffer.concat(data);
+      }); //readstream.pipe(res);
     } else {
       res.status(404).json({
         err: 'Not an stl'
       });
     }
+  });
+  sleep(2000).then(function () {
+    // This example assumes Chilkat SSH/SFTP to have been previously unlocked.
+    // See Unlock SSH for sample code.
+    var ssh = new chilkat.Ssh();
+    var sftp = new chilkat.SFtp(); // Set some timeouts, in milliseconds:
+
+    sftp.ConnectTimeoutMs = 5000;
+    sftp.IdleTimeoutMs = 10000;
+    var port = 10022;
+    var success = ssh.Connect("raspberry-pi-dinu.go.ro", port);
+
+    if (success !== true) {
+      console.log(ssh.LastErrorText);
+      return;
+    } // Authenticate using login/password:
+
+
+    success = ssh.AuthenticatePw("ubuntu", "alex123");
+
+    if (success !== true) {
+      console.log(ssh.LastErrorText);
+      return;
+    }
+
+    var success = sftp.Connect("raspberry-pi-dinu.go.ro", port);
+
+    if (success !== true) {
+      console.log(sftp.LastErrorText);
+      return;
+    } // Authenticate with the SSH server.  Chilkat SFTP supports
+    // both password-based authenication as well as public-key
+    // authentication.  This example uses password authenication.
+
+
+    success = sftp.AuthenticatePw("ubuntu", "alex123");
+
+    if (success !== true) {
+      console.log(sftp.LastErrorText);
+      return;
+    } // After authenticating, the SFTP subsystem must be initialized:
+
+
+    success = sftp.InitializeSftp();
+
+    if (success !== true) {
+      console.log(sftp.LastErrorText);
+      return;
+    } // Open a file for writing on the SSH server.
+    // If the file already exists, it is overwritten.
+    // (Specify "createNew" instead of "createTruncate" to
+    // prevent overwriting existing files.)
+
+
+    var handle = sftp.OpenFile("stl/print.stl", "writeOnly", "createTruncate");
+
+    if (sftp.LastMethodSuccess !== true) {
+      console.log(sftp.LastErrorText);
+      return;
+    } // Upload from the local file to the SSH server.
+
+
+    success = sftp.UploadFile(handle, "stl/someFile.stl");
+
+    if (success !== true) {
+      console.log(sftp.LastErrorText);
+      return;
+    } // Close the file.
+
+
+    success = sftp.CloseHandle(handle);
+
+    if (success !== true) {
+      console.log(sftp.LastErrorText);
+      return;
+    } // Start a shell session.
+    // (The QuickShell method was added in Chilkat v9.5.0.65)
+
+
+    var channelNum = ssh.QuickShell();
+
+    if (channelNum < 0) {
+      console.log(ssh.LastErrorText);
+      return;
+    }
+
+    ssh.ReadTimeoutMs = 1000; // Construct a StringBuilder with multiple commands, one per line.
+    // Note: The line-endings are potentially important.  Some SSH servers may
+    // require either LF or CRLF line endings.  (Unix/Linux/OSX servers typically
+    // use bare-LF line endings.  Windows servers likely use CRLF line endings.)
+
+    var sbCommands = new chilkat.StringBuilder(); //Make Gcode 
+
+    sbCommands.Append("CuraEngine slice -v -p -j /opt/curaengine/fdmprinter.def.json -o /home/ubuntu/gcode/print.gcode -l /home/ubuntu/stl/print.stl\n");
+    success = ssh.ChannelSendString(channelNum, sbCommands.GetAsString(), "ansi");
+    sbCommands.Clear();
+    console.log("--- output ----");
+    console.log(ssh.GetReceivedText(channelNum, "ansi"));
+    sbCommands.Append("systemctl is-active print.service\n");
+    success = ssh.ChannelSendString(channelNum, sbCommands.GetAsString(), "ansi");
+    sbCommands.Clear();
+    var checkactive = ssh.ChannelReceiveUntilMatch(channelNum, "\nactive", "ansi", false);
+    var checkinactive = ssh.ChannelReceiveUntilMatch(channelNum, "\ninactive", "ansi", false);
+    var checkfailed = ssh.ChannelReceiveUntilMatch(channelNum, "\nfailed", "ansi", false);
+
+    if (checkinactive === true) {
+      sbCommands.Append("sudo systemctl start print.service\n");
+    } else if (checkactive === true) {
+      sbCommands.Append("echo Printer Bussy\n");
+    } else if (checkfailed === true) {
+      sbCommands.Append("echo Service Failed, Try to restart service\n");
+      sbCommands.Append("sudo systemctl start print.service\n");
+    } else {
+      sbCommands.Append("echo ERROR Unknown \necho Check Logs\n\n");
+    }
+
+    success = ssh.ChannelSendString(channelNum, sbCommands.GetAsString(), "ansi");
+    sbCommands.Clear();
+    console.log(ssh.GetReceivedText(channelNum, "ansi"));
+    var sleep = ssh.ChannelReceiveUntilMatch(channelNum, "sleep:)", "ansi", false);
+    sbCommands.Append("systemctl is-active print.service\n");
+    success = ssh.ChannelSendString(channelNum, sbCommands.GetAsString(), "ansi");
+    sbCommands.Clear();
+    var checkactive = ssh.ChannelReceiveUntilMatch(channelNum, "\nactive", "ansi", false);
+    var checkfailed = ssh.ChannelReceiveUntilMatch(channelNum, "\nfailed", "ansi", false);
+
+    if (checkactive === true) {
+      sbCommands.Append("echo Print Started\n");
+    } else if (checkfailed === true) {
+      sbCommands.Append("echo Printer is DEAD\n");
+    } else {
+      sbCommands.Append("echo ERROR Unknown \nCheck Logs\n\n");
+    } // For our last command, we're going to echo a marker string that
+    // we'll use in ChannelReceiveUntilMatch below.
+    // The use of single quotes around 'IS' is a trick so that the output
+    // of the command is "THIS IS THE END OF THE SCRIPT", but the terminal echo
+    // includes the single quotes.  This allows us to read until we see the actual
+    // output of the last command.
+    //sbCommands.Append("echo THIS 'IS' THE END OF THE SCRIPT\n");
+
+
+    sbCommands.Append("exit\n"); // Send the commands..
+
+    success = ssh.ChannelSendString(channelNum, sbCommands.GetAsString(), "ansi");
+
+    if (success !== true) {
+      console.log(ssh.LastErrorText);
+      return;
+    } // Send an EOF to indicate no more commands will be sent.
+    // For brevity, we're not checking the return values of each method call.
+    // Your code should check the success/failure of each call.
+
+
+    success = ssh.ChannelSendEof(channelNum); // Receive output up to our marker.
+
+    success = ssh.ChannelReceiveUntilMatch(channelNum, "logout", "ansi", true); // Close the channel.
+    // It is important to close the channel only after receiving the desired output.
+
+    success = ssh.ChannelSendClose(channelNum); // Get any remaining output..
+
+    success = ssh.ChannelReceiveToClose(channelNum); // Get the complete output for all the commands in the session.
+
+    console.log(ssh.GetReceivedText(channelNum, "ansi"));
+    res.redirect('/success');
   });
 }); // @route DELETE /files/:id
 // @desc Delete file

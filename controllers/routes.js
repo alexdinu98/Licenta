@@ -242,7 +242,7 @@ function sleep(ms) {
 }
 
 var os = require('os');
-var chilkat = require('@chilkat/ck-node12-linux64'); 
+var chilkat = require('@chilkat/ck-node12-win64'); 
 // @route GET /print/:filename
 // @desc print the stl
 routes.get('/print/:filename',checkAuthenticated, (req, res) => {
