@@ -33,5 +33,3 @@ module.exports = function (passport) {
         });
     });
 }
-// ---------------
-// end of autentication statregy

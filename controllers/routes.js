@@ -17,10 +17,44 @@ const Grid = require('gridfs-stream');
 const methodOverride = require('method-override');
 const path = require('path');
 
+// Linkul catre baza de date
+const mongoURI= 'mongodb+srv://alexdinu98:Azsxdcfvgb1@licenta.x0rth.gcp.mongodb.net/uploads?retryWrites=true&w=majority';
 
-// using Bodyparser for getting form data
+// Conexinuea mongo pentru baza de date
+const conn = mongoose.createConnection(mongoURI, { useNewUrlParser: true, useUnifiedTopology: true });
+
+// Initializez gridfs
+let gfs;
+
+conn.once('open', () => {
+    //Initializez stream-ul de date 
+    gfs = Grid(conn.db, mongoose.mongo);
+    gfs.collection('uploads');
+});
+
+// Creez storage engine-ul
+const storage = new GridFsStorage({
+    url: mongoURI,
+    file: (req, file) => {
+      return new Promise((resolve, reject) => {
+        crypto.randomBytes(16, (err, buf) => {
+          if (err) {
+            return reject(err);
+          }
+          const filename = buf.toString('hex') + path.extname(file.originalname);
+          const fileInfo = {
+            filename: filename,
+            bucketName: 'uploads'
+          };
+          resolve(fileInfo);
+        });
+      });
+    }
+  });
+  const upload = multer({ storage });
+
+// "Bodyparser" preia datele din formularul de inregistrare
 routes.use(bodyparser.urlencoded({ extended: true }));
-// using cookie-parser and session 
 routes.use(cookieParser('secret'));
 routes.use(session({
     secret: 'secret',
@@ -28,14 +62,13 @@ routes.use(session({
     resave: true,
     saveUninitialized: true,
 }));
-// using passport for authentications 
+// Utilizez "passport" pentru autentificare
 routes.use(passport.initialize());
 routes.use(passport.session());
-// using flash for flash messages 
+// Utilizez "flash" pentru afisarea mesajelor 
 routes.use(flash());
 
-// MIDDLEWARES
-// Global variable
+
 routes.use(function (req, res, next) {
     res.locals.success_message = req.flash('success_message');
     res.locals.error_message = req.flash('error_message');
@@ -43,6 +76,7 @@ routes.use(function (req, res, next) {
     next();
 });
 
+// Am creat o functie sa verifice daca userul este autentificat
 const checkAuthenticated = function (req, res, next) {
     if (req.isAuthenticated()) {
         res.set('Cache-Control', 'no-cache, private, no-store, must-revalidate, post-check=0, pre-check=0');
@@ -52,19 +86,38 @@ const checkAuthenticated = function (req, res, next) {
     }
 }
 
-// Connecting To Database
-// using Mongo Atlas as database
+// Se creaza conexiunea la baza de date
+// folosind Mongo Atlas (baza de date in cloud)
 mongoose.connect('mongodb+srv://alexdinu98:Azsxdcfvgb1@licenta.x0rth.gcp.mongodb.net/uploads?retryWrites=true&w=majority' ,{
     useNewUrlParser: true, useUnifiedTopology: true,
 }).then(() => console.log("Database Connected")
 );
 
 
-// ALL THE ROUTES 
+// Route-urile folosite
+
+//Metoda de suprascriere pentru stergerea unui fisier
+routes.use(methodOverride('_method'));
+
 routes.get('/', (req, res) => {
     res.render('index');
 })
 
+// Strategia de autentificare
+routes.get('/login', (req, res) => {
+    res.render('login');
+});
+
+routes.post('/login', (req, res, next) => {
+    passport.authenticate('local', {
+        failureRedirect: '/login',
+        successRedirect: '/success',
+        failureFlash: true,
+    })(req, res, next);
+});
+
+// @route POST/register
+//@desc Route pentru inregistrarea unui nou utilizator
 routes.post('/register', (req, res) => {
     var { email, username, password, confirmpassword } = req.body;
     var err;
@@ -105,67 +158,11 @@ routes.post('/register', (req, res) => {
     }
 });
 
-
-// Authentication Strategy
-// ---------------
-
-
-routes.get('/login', (req, res) => {
-    res.render('login');
-});
-
-routes.post('/login', (req, res, next) => {
-    passport.authenticate('local', {
-        failureRedirect: '/login',
-        successRedirect: '/success',
-        failureFlash: true,
-    })(req, res, next);
-});
-
-
-routes.use(methodOverride('_method'));
-
-// Mongo URI
-const mongoURI= 'mongodb+srv://alexdinu98:Azsxdcfvgb1@licenta.x0rth.gcp.mongodb.net/uploads?retryWrites=true&w=majority';
-
-// Create mongo connection
-const conn = mongoose.createConnection(mongoURI, { useNewUrlParser: true, useUnifiedTopology: true });
-
-// Initgfs
-let gfs;
-
-conn.once('open', () => {
-    //Init stream
-    gfs = Grid(conn.db, mongoose.mongo);
-    gfs.collection('uploads');
-});
-
-// Create storage engine
-const storage = new GridFsStorage({
-    url: mongoURI,
-    file: (req, file) => {
-      return new Promise((resolve, reject) => {
-        crypto.randomBytes(16, (err, buf) => {
-          if (err) {
-            return reject(err);
-          }
-          const filename = buf.toString('hex') + path.extname(file.originalname);
-          const fileInfo = {
-            filename: filename,
-            bucketName: 'uploads'
-          };
-          resolve(fileInfo);
-        });
-      });
-    }
-  });
-  const upload = multer({ storage });
-
-  // @route GET/
-  //@desc Loads form
+//@route GET/
+//@desc Route pentru pagina de print
 routes.get('/success',checkAuthenticated,(req, res) => {
     gfs.files.find().toArray((err, files) => {
-        // Check if files
+        // Verifica daca exista vreun fisier in baza de date
         if (!files || files.length === 0 ) {
             res.render('success', {files: false});
         } else {
@@ -182,61 +179,29 @@ routes.get('/success',checkAuthenticated,(req, res) => {
 });
 
 //@route POST /upload
-//@desc Uploads file to DB
+//@desc Incarca fisierul in baza de date
 routes.post('/upload', upload.single('file'),checkAuthenticated , (req, res) => {
-    //res.json({file : req.file});
     res.redirect('/success');
 });
 
-// @route GET /files
-// @desc Display all files in JSON
-routes.get('/files',checkAuthenticated, (req, res) => {
-    gfs.files.find().toArray((err, files) => {
-        // Check if files
-        if (!files || files.length === 0 ) {
-            return res.status(404).json({
-                err: 'No files exist'
-            });
-        }
-
-        // Files exist
-        return res.json(files);
-    });
-});
-
-// @route GET /files/:filename
-// @desc Display single file object
-routes.get('/files/:filename',checkAuthenticated, (req, res) => {
-    gfs.files.findOne({filename: req.params.filename}, (err, file) => {
-    // Check if file
-    if (!file || file.length === 0 ) {
-        return res.status(404).json({
-            err: 'No file exist'
-        });
-    }
-    //File exists
-    return res.json(file);
-});
-});
-
 // @route GET /stl/:filename
-// @desc Download the stl
+// @desc Descarca fisierul stl in device-ul utilizatorului
 routes.get('/stl/:filename',checkAuthenticated, (req, res) => {
     gfs.files.findOne({filename: req.params.filename}, (err, file) => {
-    // Check if file
+    // Verifica daca exista vreun fisier in baza de date
     if (!file || file.length === 0 ) {
         return res.status(404).json({
             err: 'No file exist'
         });
     }
-    
-        // Read output to browser
-        const readstream = gfs.createReadStream(file.filename);
-        readstream.pipe(res);
+    const readstream = gfs.createReadStream(file.filename);
+    readstream.pipe(res);
     
 });
 });
 
+// @desc Am creat aceasta functie pentru a intarzia comenzile SFTP si SSH,
+// pentru ca download-ul fisierului si transferul acestuia sa aiba loc
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -248,15 +213,14 @@ var chilkat = require('@chilkat/ck-node12-win64');
 routes.get('/print/:filename',checkAuthenticated, (req, res) => {
 
     gfs.files.findOne({filename: req.params.filename}, (err, file) => {
-        // Check if file
+        // Verifica daca exista vreun fisier in baza de date
         if (!file || file.length === 0 ) {
             return res.status(404).json({
                 err: 'No file exist'
             });
         }
-        //Check if stl
+        // Verifica daca fisierul este de tip stl si il descarca in folderul /stl din server
         if(file.contentType === 'application/octet-stream' ){
-            // Read output to browser
             var fs = require('fs');
             let data = [];
             let readstream = gfs.createReadStream(file.filename);
@@ -267,7 +231,6 @@ routes.get('/print/:filename',checkAuthenticated, (req, res) => {
             readstream.on('end', function () {
                data = Buffer.concat(data);
             });
-            //readstream.pipe(res);
         } else{
             res.status(404).json({
                 err: 'Not an stl'
@@ -275,91 +238,117 @@ routes.get('/print/:filename',checkAuthenticated, (req, res) => {
         }
     });
     sleep(2000).then(() => {
-    // This example assumes Chilkat SSH/SFTP to have been previously unlocked.
-    // See Unlock SSH for sample code.
 
+    
     var ssh = new chilkat.Ssh();
     var sftp = new chilkat.SFtp();
 
-    // Set some timeouts, in milliseconds:
     sftp.ConnectTimeoutMs = 5000;
     sftp.IdleTimeoutMs = 10000;
 
     var port = 10022;
+    
+    // Deschide conexiunea SFTP si SSH din serverul NodeJS catre RaspberryPi
     var success = ssh.Connect("raspberry-pi-dinu.go.ro",port);
     if (success !== true) {
         console.log(ssh.LastErrorText);
         return;
     }
-
-    // Authenticate using login/password:
-    success = ssh.AuthenticatePw("ubuntu","alex123");
-    if (success !== true) {
-        console.log(ssh.LastErrorText);
-        return;
-    }
-
     var success = sftp.Connect("raspberry-pi-dinu.go.ro",port);
     if (success !== true) {
         console.log(sftp.LastErrorText);
         return;
     }
 
-    // Authenticate with the SSH server.  Chilkat SFTP supports
-    // both password-based authenication as well as public-key
-    // authentication.  This example uses password authenication.
+    // Autentificarea SSH si SFTP catre RaspberryPi
+    success = ssh.AuthenticatePw("ubuntu","alex123");
+    if (success !== true) {
+        console.log(ssh.LastErrorText);
+        return;
+    }
     success = sftp.AuthenticatePw("ubuntu","alex123");
     if (success !== true) {
         console.log(sftp.LastErrorText);
         return;
     }
 
-    // After authenticating, the SFTP subsystem must be initialized:
+    // Initializare SFTP
     success = sftp.InitializeSftp();
     if (success !== true) {
         console.log(sftp.LastErrorText);
         return;
     }
 
-    // Open a file for writing on the SSH server.
-    // If the file already exists, it is overwritten.
-    // (Specify "createNew" instead of "createTruncate" to
-    // prevent overwriting existing files.)
+    
+    // Deschide un fisier pentru scriere
+    // Daca aceesta deja exista, el va fi rescris
     var handle = sftp.OpenFile("stl/print.stl","writeOnly","createTruncate");
     if (sftp.LastMethodSuccess !== true) {
         console.log(sftp.LastErrorText);
         return;
     }
 
-    // Upload from the local file to the SSH server.
+    // Uploadeaza fiserul din serveru de NodeJS in folderul /stl din RaspberryPi
     success = sftp.UploadFile(handle,"stl/someFile.stl");
     if (success !== true) {
         console.log(sftp.LastErrorText);
         return;
     }
 
-    // Close the file.
+    // Inchide fisierul
     success = sftp.CloseHandle(handle);
     if (success !== true) {
         console.log(sftp.LastErrorText);
         return;
     }
 
-    // Start a shell session.
-    // (The QuickShell method was added in Chilkat v9.5.0.65)
+    // Porneste sesiunea shell
     var channelNum = ssh.QuickShell();
     if (channelNum < 0) {
         console.log(ssh.LastErrorText);
         return;
     }
     ssh.ReadTimeoutMs = 1000;
-    // Construct a StringBuilder with multiple commands, one per line.
-    // Note: The line-endings are potentially important.  Some SSH servers may
-    // require either LF or CRLF line endings.  (Unix/Linux/OSX servers typically
-    // use bare-LF line endings.  Windows servers likely use CRLF line endings.)
     var sbCommands = new chilkat.StringBuilder();
     
-    //Make Gcode 
+    /*
+    Acesta este scriptul Python care citeste si trimite comenzile linie cu linie catre imprimanta 3d,
+    Scriptul este transformat in service, utilizatorul nefiind obligat sa tina browserul deschis
+    pe perioada printarii
+
+    import serial
+    import sys
+    import time
+
+    #reads the gcode file
+    gcodeFile = open('/home/ubuntu/example.gcode','r')
+    gcode = gcodeFile.readlines()
+
+    #connects to the printer
+    printer = serial.Serial('/dev/ttyUSB0',115200)
+
+    #executes each line of the gcode
+    for line in gcode:
+    response = ''
+    #removes comments
+    line = line.split(";")[0]
+    #makes sure line is a valid command
+    if(line != "" and line != "\n"):
+        print("line: "+line)
+        #writes the gcode to the printer
+        printer.write(str.encode(line+'\n'))
+        #waits for OK response from printer
+        while response.count("ok") == 0:
+            #waits for response
+            while printer.in_waiting == 0:
+                time.sleep(0.01)
+            response = ''
+            #gets response info
+            while printer.in_waiting > 0:
+                response += str(printer.readline())
+            print(response)*/
+
+    //Transforma fisierul stl in gcode cu ajutorul CuraEngine
     sbCommands.Append("CuraEngine slice -v -p -j /opt/curaengine/fdmprinter.def.json -o /home/ubuntu/gcode/print.gcode -l /home/ubuntu/stl/print.stl\n");
     success = ssh.ChannelSendString(channelNum,sbCommands.GetAsString(),"ansi");sbCommands.Clear();
     console.log("--- output ----");
@@ -393,39 +382,25 @@ routes.get('/print/:filename',checkAuthenticated, (req, res) => {
                 } else {
                     sbCommands.Append("echo ERROR Unknown \nCheck Logs\n\n");
                 }        
-    // For our last command, we're going to echo a marker string that
-    // we'll use in ChannelReceiveUntilMatch below.
-    // The use of single quotes around 'IS' is a trick so that the output
-    // of the command is "THIS IS THE END OF THE SCRIPT", but the terminal echo
-    // includes the single quotes.  This allows us to read until we see the actual
-    // output of the last command.
-    //sbCommands.Append("echo THIS 'IS' THE END OF THE SCRIPT\n");
     sbCommands.Append("exit\n");
     
 
-    // Send the commands..
+    // Trimite toate comenzile SSH
     success = ssh.ChannelSendString(channelNum,sbCommands.GetAsString(),"ansi");
     if (success !== true) {
         console.log(ssh.LastErrorText);
         return;
     }
 
-    // Send an EOF to indicate no more commands will be sent.
-    // For brevity, we're not checking the return values of each method call.
-    // Your code should check the success/failure of each call.
+ 
     success = ssh.ChannelSendEof(channelNum);
 
-    // Receive output up to our marker.
     success = ssh.ChannelReceiveUntilMatch(channelNum,"logout","ansi",true);
 
-    // Close the channel.
-    // It is important to close the channel only after receiving the desired output.
     success = ssh.ChannelSendClose(channelNum);
 
-    // Get any remaining output..
     success = ssh.ChannelReceiveToClose(channelNum);
 
-    // Get the complete output for all the commands in the session.
     console.log(ssh.GetReceivedText(channelNum,"ansi"));
 
     res.redirect('/success');
@@ -435,7 +410,7 @@ routes.get('/print/:filename',checkAuthenticated, (req, res) => {
 
 
 // @route DELETE /files/:id
-// @desc Delete file
+// @desc Sterge un fisier stl
 routes.delete('/files/:id',checkAuthenticated, (req,res) => {
     gfs.remove({_id: req.params.id, root: 'uploads'}, (err, gridStore) => {
         if(err) {
