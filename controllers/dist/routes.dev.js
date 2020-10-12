@@ -236,11 +236,9 @@ routes.get('/stl/:filename', checkAuthenticated, function (req, res) {
 }); // @desc Am creat aceasta functie pentru a intarzia comenzile SFTP si SSH,
 // pentru ca download-ul fisierului si transferul acestuia sa aiba loc
 
-function sleep(ms) {
-  return new Promise(function (resolve) {
-    return setTimeout(resolve, ms);
-  });
-}
+/*function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}*/
 
 var os = require('os');
 
@@ -274,104 +272,196 @@ routes.get('/print/:filename', checkAuthenticated, function (req, res) {
       readstream.on('end', function () {
         data = Buffer.concat(data);
       });
+      console.log("----File downloaded(in teory)----");
     } else {
       res.status(404).json({
         err: 'Not an stl'
       });
     }
   });
-  sleep(2000).then(function () {
-    var ssh = new chilkat.Ssh();
-    var sftp = new chilkat.SFtp();
-    sftp.ConnectTimeoutMs = 5000;
-    sftp.IdleTimeoutMs = 10000;
-    var port = 10022; // Deschide conexiunea SFTP si SSH din serverul NodeJS catre RaspberryPi
+  var ssh = new chilkat.Ssh();
+  var sftp = new chilkat.SFtp();
+  sftp.ConnectTimeoutMs = 5000;
+  sftp.IdleTimeoutMs = 10000;
+  ssh.ReadTimeoutMs = 1000;
+  var port = 10022; // Deschide conexiunea SFTP si SSH din serverul NodeJS catre RaspberryPi
 
-    var success = ssh.Connect("raspberry-pi-dinu.go.ro", port);
+  var success = ssh.Connect("raspberry-pi-dinu.go.ro", port);
 
-    if (success !== true) {
-      console.log(ssh.LastErrorText);
-      return;
+  if (success !== true) {
+    console.log(ssh.LastErrorText);
+    return;
+  }
+
+  var success = sftp.Connect("raspberry-pi-dinu.go.ro", port);
+
+  if (success !== true) {
+    console.log(sftp.LastErrorText);
+    return;
+  }
+
+  console.log("----ssh/sftp connected----"); // Autentificarea SSH si SFTP catre RaspberryPi
+
+  success = ssh.AuthenticatePw("ubuntu", "alex123");
+
+  if (success !== true) {
+    console.log(ssh.LastErrorText);
+    return;
+  }
+
+  success = sftp.AuthenticatePw("ubuntu", "alex123");
+
+  if (success !== true) {
+    console.log(sftp.LastErrorText);
+    return;
+  }
+
+  console.log("----ssh/sftp autentificat----"); // Initializare SFTP
+
+  success = sftp.InitializeSftp();
+
+  if (success !== true) {
+    console.log(sftp.LastErrorText);
+    return;
+  }
+
+  console.log("----sftp initializat----");
+  sftp.IdleTimeoutMs = 0; // Deschide un fisier pentru scriere
+  // Daca aceesta deja exista, el va fi rescris
+
+  var handle = sftp.OpenFile("stl/print.stl", "writeOnly", "createTruncate");
+
+  if (sftp.LastMethodSuccess !== true) {
+    console.log(sftp.LastErrorText);
+    return;
+  }
+
+  console.log("----fisier deschis----"); // Uploadeaza fiserul din serveru de NodeJS in folderul /stl din RaspberryPi
+
+  success = sftp.UploadFile(handle, "stl/someFile.stl");
+
+  if (success !== true) {
+    console.log(sftp.LastErrorText);
+    return;
+  }
+
+  console.log("----fisier incarcat----");
+  sftp.IdleTimeoutMs = 10000; // Inchide fisierul
+
+  success = sftp.CloseHandle(handle);
+
+  if (success !== true) {
+    console.log(sftp.LastErrorText);
+    return;
+  }
+
+  console.log("----sftp inchis----"); // Porneste sesiunea shell
+
+  var channelNum = ssh.QuickShell();
+
+  if (channelNum < 0) {
+    console.log(ssh.LastErrorText);
+    return;
+  }
+
+  console.log("----quick shell----");
+  var sbCommands = new chilkat.StringBuilder(); //Transforma fisierul stl in gcode cu ajutorul CuraEngine si il trimite linie cu linie catre imprimanta 3d
+
+  ssh.ReadTimeoutMs = 0;
+  sbCommands.Append("CuraEngine slice -v -p -j /opt/curaengine/fdmprinter.def.json -o /home/ubuntu/gcode/print.gcode -l /home/ubuntu/stl/print.stl\n");
+  success = ssh.ChannelSendString(channelNum, sbCommands.GetAsString(), "ansi");
+  sbCommands.Clear();
+  success = ssh.ChannelReceiveUntilMatch(channelNum, "Filament (mm^3):", "ansi", true);
+  ssh.ReadTimeoutMs = 1000;
+  console.log("--- output ----");
+  console.log(ssh.GetReceivedText(channelNum, "ansi"));
+  console.log("----gcode should be created----");
+  sbCommands.Append("systemctl is-active print.service\n");
+  success = ssh.ChannelSendString(channelNum, sbCommands.GetAsString(), "ansi");
+  sbCommands.Clear();
+  var checkactive = ssh.ChannelReceiveUntilMatch(channelNum, "\nactive", "ansi", false);
+  var checkinactive = ssh.ChannelReceiveUntilMatch(channelNum, "\ninactive", "ansi", false);
+  var checkfailed = ssh.ChannelReceiveUntilMatch(channelNum, "\nfailed", "ansi", false);
+
+  if (checkinactive === true) {
+    sbCommands.Append("sudo systemctl start print.service\n");
+  } else if (checkactive === true) {
+    sbCommands.Append("echo Printer Bussy\n");
+  } else if (checkfailed === true) {
+    sbCommands.Append("echo Service Failed, Try to restart service\n");
+    sbCommands.Append("sudo systemctl start print.service\n");
+  } else {
+    sbCommands.Append("echo ERROR Unknown \necho Check Logs\n\n");
+  }
+
+  success = ssh.ChannelSendString(channelNum, sbCommands.GetAsString(), "ansi");
+  sbCommands.Clear();
+  console.log(ssh.GetReceivedText(channelNum, "ansi"));
+  var sleep = ssh.ChannelReceiveUntilMatch(channelNum, "sleep:)", "ansi", false);
+  sbCommands.Append("systemctl is-active print.service\n");
+  success = ssh.ChannelSendString(channelNum, sbCommands.GetAsString(), "ansi");
+  sbCommands.Clear();
+  var checkactive = ssh.ChannelReceiveUntilMatch(channelNum, "\nactive", "ansi", false);
+  var checkfailed = ssh.ChannelReceiveUntilMatch(channelNum, "\nfailed", "ansi", false);
+
+  if (checkactive === true) {
+    sbCommands.Append("echo Print Started\n");
+  } else if (checkfailed === true) {
+    sbCommands.Append("echo Printer is DEAD\n");
+  } else {
+    sbCommands.Append("echo ERROR Unknown \nCheck Logs\n\n");
+  }
+
+  sbCommands.Append("exit\n"); // Trimite toate comenzile SSH
+
+  success = ssh.ChannelSendString(channelNum, sbCommands.GetAsString(), "ansi");
+
+  if (success !== true) {
+    console.log(ssh.LastErrorText);
+    return;
+  }
+
+  success = ssh.ChannelSendEof(channelNum);
+  success = ssh.ChannelReceiveUntilMatch(channelNum, "logout", "ansi", true);
+  success = ssh.ChannelSendClose(channelNum);
+  success = ssh.ChannelReceiveToClose(channelNum);
+  console.log(ssh.GetReceivedText(channelNum, "ansi"));
+  res.redirect('/success');
+}); // @route DELETE /files/:id
+// @desc Sterge un fisier stl
+
+routes["delete"]('/files/:id', checkAuthenticated, function (req, res) {
+  gfs.remove({
+    _id: req.params.id,
+    root: 'uploads'
+  }, function (err, gridStore) {
+    if (err) {
+      return res.status(404).json({
+        err: err
+      });
     }
 
-    var success = sftp.Connect("raspberry-pi-dinu.go.ro", port);
-
-    if (success !== true) {
-      console.log(sftp.LastErrorText);
-      return;
-    } // Autentificarea SSH si SFTP catre RaspberryPi
-
-
-    success = ssh.AuthenticatePw("ubuntu", "alex123");
-
-    if (success !== true) {
-      console.log(ssh.LastErrorText);
-      return;
-    }
-
-    success = sftp.AuthenticatePw("ubuntu", "alex123");
-
-    if (success !== true) {
-      console.log(sftp.LastErrorText);
-      return;
-    } // Initializare SFTP
-
-
-    success = sftp.InitializeSftp();
-
-    if (success !== true) {
-      console.log(sftp.LastErrorText);
-      return;
-    } // Deschide un fisier pentru scriere
-    // Daca aceesta deja exista, el va fi rescris
-
-
-    var handle = sftp.OpenFile("stl/print.stl", "writeOnly", "createTruncate");
-
-    if (sftp.LastMethodSuccess !== true) {
-      console.log(sftp.LastErrorText);
-      return;
-    } // Uploadeaza fiserul din serveru de NodeJS in folderul /stl din RaspberryPi
-
-
-    success = sftp.UploadFile(handle, "stl/someFile.stl");
-
-    if (success !== true) {
-      console.log(sftp.LastErrorText);
-      return;
-    } // Inchide fisierul
-
-
-    success = sftp.CloseHandle(handle);
-
-    if (success !== true) {
-      console.log(sftp.LastErrorText);
-      return;
-    } // Porneste sesiunea shell
-
-
-    var channelNum = ssh.QuickShell();
-
-    if (channelNum < 0) {
-      console.log(ssh.LastErrorText);
-      return;
-    }
-
-    ssh.ReadTimeoutMs = 1000;
-    var sbCommands = new chilkat.StringBuilder();
-    /*
+    res.redirect('/success');
+  });
+});
+module.exports = routes;
+/*
     Acesta este scriptul Python care citeste si trimite comenzile linie cu linie catre imprimanta 3d,
     Scriptul este transformat in service, utilizatorul nefiind obligat sa tina browserul deschis
     pe perioada printarii
-     import serial
+
+    import serial
     import sys
     import time
-     #reads the gcode file
+
+    #reads the gcode file
     gcodeFile = open('/home/ubuntu/example.gcode','r')
     gcode = gcodeFile.readlines()
-     #connects to the printer
+
+    #connects to the printer
     printer = serial.Serial('/dev/ttyUSB0',115200)
-     #executes each line of the gcode
+
+    #executes each line of the gcode
     for line in gcode:
     response = ''
     #removes comments
@@ -391,80 +481,3 @@ routes.get('/print/:filename', checkAuthenticated, function (req, res) {
             while printer.in_waiting > 0:
                 response += str(printer.readline())
             print(response)*/
-    //Transforma fisierul stl in gcode cu ajutorul CuraEngine
-
-    sbCommands.Append("CuraEngine slice -v -p -j /opt/curaengine/fdmprinter.def.json -o /home/ubuntu/gcode/print.gcode -l /home/ubuntu/stl/print.stl\n");
-    success = ssh.ChannelSendString(channelNum, sbCommands.GetAsString(), "ansi");
-    sbCommands.Clear();
-    console.log("--- output ----");
-    console.log(ssh.GetReceivedText(channelNum, "ansi"));
-    sbCommands.Append("systemctl is-active print.service\n");
-    success = ssh.ChannelSendString(channelNum, sbCommands.GetAsString(), "ansi");
-    sbCommands.Clear();
-    var checkactive = ssh.ChannelReceiveUntilMatch(channelNum, "\nactive", "ansi", false);
-    var checkinactive = ssh.ChannelReceiveUntilMatch(channelNum, "\ninactive", "ansi", false);
-    var checkfailed = ssh.ChannelReceiveUntilMatch(channelNum, "\nfailed", "ansi", false);
-
-    if (checkinactive === true) {
-      sbCommands.Append("sudo systemctl start print.service\n");
-    } else if (checkactive === true) {
-      sbCommands.Append("echo Printer Bussy\n");
-    } else if (checkfailed === true) {
-      sbCommands.Append("echo Service Failed, Try to restart service\n");
-      sbCommands.Append("sudo systemctl start print.service\n");
-    } else {
-      sbCommands.Append("echo ERROR Unknown \necho Check Logs\n\n");
-    }
-
-    success = ssh.ChannelSendString(channelNum, sbCommands.GetAsString(), "ansi");
-    sbCommands.Clear();
-    console.log(ssh.GetReceivedText(channelNum, "ansi"));
-    var sleep = ssh.ChannelReceiveUntilMatch(channelNum, "sleep:)", "ansi", false);
-    sbCommands.Append("systemctl is-active print.service\n");
-    success = ssh.ChannelSendString(channelNum, sbCommands.GetAsString(), "ansi");
-    sbCommands.Clear();
-    var checkactive = ssh.ChannelReceiveUntilMatch(channelNum, "\nactive", "ansi", false);
-    var checkfailed = ssh.ChannelReceiveUntilMatch(channelNum, "\nfailed", "ansi", false);
-
-    if (checkactive === true) {
-      sbCommands.Append("echo Print Started\n");
-    } else if (checkfailed === true) {
-      sbCommands.Append("echo Printer is DEAD\n");
-    } else {
-      sbCommands.Append("echo ERROR Unknown \nCheck Logs\n\n");
-    }
-
-    sbCommands.Append("exit\n"); // Trimite toate comenzile SSH
-
-    success = ssh.ChannelSendString(channelNum, sbCommands.GetAsString(), "ansi");
-
-    if (success !== true) {
-      console.log(ssh.LastErrorText);
-      return;
-    }
-
-    success = ssh.ChannelSendEof(channelNum);
-    success = ssh.ChannelReceiveUntilMatch(channelNum, "logout", "ansi", true);
-    success = ssh.ChannelSendClose(channelNum);
-    success = ssh.ChannelReceiveToClose(channelNum);
-    console.log(ssh.GetReceivedText(channelNum, "ansi"));
-    res.redirect('/success');
-  });
-}); // @route DELETE /files/:id
-// @desc Sterge un fisier stl
-
-routes["delete"]('/files/:id', checkAuthenticated, function (req, res) {
-  gfs.remove({
-    _id: req.params.id,
-    root: 'uploads'
-  }, function (err, gridStore) {
-    if (err) {
-      return res.status(404).json({
-        err: err
-      });
-    }
-
-    res.redirect('/success');
-  });
-});
-module.exports = routes;

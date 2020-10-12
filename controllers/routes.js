@@ -202,16 +202,15 @@ routes.get('/stl/:filename',checkAuthenticated, (req, res) => {
 
 // @desc Am creat aceasta functie pentru a intarzia comenzile SFTP si SSH,
 // pentru ca download-ul fisierului si transferul acestuia sa aiba loc
-function sleep(ms) {
+/*function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
-}
+}*/
 
 var os = require('os');
 var chilkat = require('@chilkat/ck-node12-win64'); 
 // @route GET /print/:filename
 // @desc print the stl
 routes.get('/print/:filename',checkAuthenticated, (req, res) => {
-
     gfs.files.findOne({filename: req.params.filename}, (err, file) => {
         // Verifica daca exista vreun fisier in baza de date
         if (!file || file.length === 0 ) {
@@ -231,21 +230,20 @@ routes.get('/print/:filename',checkAuthenticated, (req, res) => {
             readstream.on('end', function () {
                data = Buffer.concat(data);
             });
+            console.log("----File downloaded(in teory)----");
         } else{
             res.status(404).json({
                 err: 'Not an stl'
             })
         }
     });
-    sleep(2000).then(() => {
-
     
     var ssh = new chilkat.Ssh();
     var sftp = new chilkat.SFtp();
 
     sftp.ConnectTimeoutMs = 5000;
     sftp.IdleTimeoutMs = 10000;
-
+    ssh.ReadTimeoutMs = 1000;
     var port = 10022;
     
     // Deschide conexiunea SFTP si SSH din serverul NodeJS catre RaspberryPi
@@ -259,6 +257,7 @@ routes.get('/print/:filename',checkAuthenticated, (req, res) => {
         console.log(sftp.LastErrorText);
         return;
     }
+    console.log("----ssh/sftp connected----");
 
     // Autentificarea SSH si SFTP catre RaspberryPi
     success = ssh.AuthenticatePw("ubuntu","alex123");
@@ -271,6 +270,7 @@ routes.get('/print/:filename',checkAuthenticated, (req, res) => {
         console.log(sftp.LastErrorText);
         return;
     }
+    console.log("----ssh/sftp autentificat----");
 
     // Initializare SFTP
     success = sftp.InitializeSftp();
@@ -278,8 +278,8 @@ routes.get('/print/:filename',checkAuthenticated, (req, res) => {
         console.log(sftp.LastErrorText);
         return;
     }
-
-    
+    console.log("----sftp initializat----");
+    sftp.IdleTimeoutMs = 0;
     // Deschide un fisier pentru scriere
     // Daca aceesta deja exista, el va fi rescris
     var handle = sftp.OpenFile("stl/print.stl","writeOnly","createTruncate");
@@ -287,20 +287,22 @@ routes.get('/print/:filename',checkAuthenticated, (req, res) => {
         console.log(sftp.LastErrorText);
         return;
     }
-
+    console.log("----fisier deschis----");
     // Uploadeaza fiserul din serveru de NodeJS in folderul /stl din RaspberryPi
     success = sftp.UploadFile(handle,"stl/someFile.stl");
     if (success !== true) {
         console.log(sftp.LastErrorText);
         return;
     }
-
+    console.log("----fisier incarcat----");
+    sftp.IdleTimeoutMs = 10000;
     // Inchide fisierul
     success = sftp.CloseHandle(handle);
     if (success !== true) {
         console.log(sftp.LastErrorText);
         return;
     }
+    console.log("----sftp inchis----");
 
     // Porneste sesiunea shell
     var channelNum = ssh.QuickShell();
@@ -308,51 +310,19 @@ routes.get('/print/:filename',checkAuthenticated, (req, res) => {
         console.log(ssh.LastErrorText);
         return;
     }
-    ssh.ReadTimeoutMs = 1000;
+    console.log("----quick shell----");
+    
     var sbCommands = new chilkat.StringBuilder();
     
-    /*
-    Acesta este scriptul Python care citeste si trimite comenzile linie cu linie catre imprimanta 3d,
-    Scriptul este transformat in service, utilizatorul nefiind obligat sa tina browserul deschis
-    pe perioada printarii
-
-    import serial
-    import sys
-    import time
-
-    #reads the gcode file
-    gcodeFile = open('/home/ubuntu/example.gcode','r')
-    gcode = gcodeFile.readlines()
-
-    #connects to the printer
-    printer = serial.Serial('/dev/ttyUSB0',115200)
-
-    #executes each line of the gcode
-    for line in gcode:
-    response = ''
-    #removes comments
-    line = line.split(";")[0]
-    #makes sure line is a valid command
-    if(line != "" and line != "\n"):
-        print("line: "+line)
-        #writes the gcode to the printer
-        printer.write(str.encode(line+'\n'))
-        #waits for OK response from printer
-        while response.count("ok") == 0:
-            #waits for response
-            while printer.in_waiting == 0:
-                time.sleep(0.01)
-            response = ''
-            #gets response info
-            while printer.in_waiting > 0:
-                response += str(printer.readline())
-            print(response)*/
-
-    //Transforma fisierul stl in gcode cu ajutorul CuraEngine
+    //Transforma fisierul stl in gcode cu ajutorul CuraEngine si il trimite linie cu linie catre imprimanta 3d
+    ssh.ReadTimeoutMs = 0;
     sbCommands.Append("CuraEngine slice -v -p -j /opt/curaengine/fdmprinter.def.json -o /home/ubuntu/gcode/print.gcode -l /home/ubuntu/stl/print.stl\n");
     success = ssh.ChannelSendString(channelNum,sbCommands.GetAsString(),"ansi");sbCommands.Clear();
+    success =ssh.ChannelReceiveUntilMatch(channelNum,"Filament (mm^3):","ansi",true);
+    ssh.ReadTimeoutMs = 1000;
     console.log("--- output ----");
     console.log(ssh.GetReceivedText(channelNum,"ansi"));
+    console.log("----gcode should be created----");
     sbCommands.Append("systemctl is-active print.service\n");
     success = ssh.ChannelSendString(channelNum,sbCommands.GetAsString(),"ansi");sbCommands.Clear();
     var checkactive = ssh.ChannelReceiveUntilMatch(channelNum,"\nactive","ansi",false);
@@ -405,7 +375,6 @@ routes.get('/print/:filename',checkAuthenticated, (req, res) => {
 
     res.redirect('/success');
 });
-});
 
 
 
@@ -422,3 +391,40 @@ routes.delete('/files/:id',checkAuthenticated, (req,res) => {
 });
 
 module.exports = routes;
+
+/*
+    Acesta este scriptul Python care citeste si trimite comenzile linie cu linie catre imprimanta 3d,
+    Scriptul este transformat in service, utilizatorul nefiind obligat sa tina browserul deschis
+    pe perioada printarii
+
+    import serial
+    import sys
+    import time
+
+    #reads the gcode file
+    gcodeFile = open('/home/ubuntu/example.gcode','r')
+    gcode = gcodeFile.readlines()
+
+    #connects to the printer
+    printer = serial.Serial('/dev/ttyUSB0',115200)
+
+    #executes each line of the gcode
+    for line in gcode:
+    response = ''
+    #removes comments
+    line = line.split(";")[0]
+    #makes sure line is a valid command
+    if(line != "" and line != "\n"):
+        print("line: "+line)
+        #writes the gcode to the printer
+        printer.write(str.encode(line+'\n'))
+        #waits for OK response from printer
+        while response.count("ok") == 0:
+            #waits for response
+            while printer.in_waiting == 0:
+                time.sleep(0.01)
+            response = ''
+            #gets response info
+            while printer.in_waiting > 0:
+                response += str(printer.readline())
+            print(response)*/
